@@ -381,17 +381,6 @@ const INFO_KEYS =
 const qualityCache = new Map();
 const infoInflight = new Map();
 
-function decodeDriveText(value) {
-  return decodeURIComponent(
-    String(value || "")
-      .replace(/\\u003d/gi, "=")
-      .replace(/\\u0026/gi, "&")
-      .replace(/\\u003c/gi, "<")
-      .replace(/\\u003e/gi, ">")
-      .replace(/\\\//g, "/")
-  );
-}
-
 function extractInfoField(body, key) {
   const token = `${key}=`;
   const start = body.indexOf(token);
