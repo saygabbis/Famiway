@@ -1,12 +1,14 @@
 import { createServer } from "node:http";
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { handleApi } from "./drive.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "dist");
 const port = Number(process.env.PORT) || 4173;
+const host = process.env.HOST || "0.0.0.0";
 
 const mime = {
   ".html": "text/html; charset=utf-8",
@@ -52,8 +54,24 @@ async function exists(filePath) {
   }
 }
 
-server.listen(port, "0.0.0.0", () => {
-  console.log(`Famiway ouvindo em 0.0.0.0:${port}`);
-  console.log(`Local:   http://127.0.0.1:${port}`);
-  console.log(`Público: http://SEU_IP:${port}`);
+function networkUrls(listenPort) {
+  const urls = [];
+  for (const entries of Object.values(os.networkInterfaces())) {
+    for (const item of entries || []) {
+      const family = String(item.family);
+      if ((family !== "IPv4" && family !== "4") || item.internal) continue;
+      urls.push(`http://${item.address}:${listenPort}/`);
+    }
+  }
+  return urls;
+}
+
+server.listen(port, host, () => {
+  console.log("");
+  console.log(`  Famiway ready`);
+  console.log(`  ➜  Local:   http://localhost:${port}/`);
+  for (const url of networkUrls(port)) {
+    console.log(`  ➜  Network: ${url}`);
+  }
+  console.log("");
 });
