@@ -53,5 +53,7 @@ async function exists(filePath) {
 }
 
 server.listen(port, "0.0.0.0", () => {
-  console.log(`Famiway em http://localhost:${port}`);
+  console.log(`Famiway ouvindo em 0.0.0.0:${port}`);
+  console.log(`Local:   http://127.0.0.1:${port}`);
+  console.log(`Público: http://SEU_IP:${port}`);
 });
