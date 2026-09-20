@@ -1,0 +1,10 @@
+node_modules
+dist
+.DS_Store
+*.local
+_parse_drive.py
+_ivd.json
+ivd-debug.txt
+*.bin
+.env
+.env.*
