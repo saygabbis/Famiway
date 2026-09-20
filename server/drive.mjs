@@ -379,6 +379,7 @@ const INFO_KEYS =
   "fmt_list|fmt_stream_map|url_encoded_fmt_stream_map|adaptive_fmts|hlsvp|dashmpd|status|title|length_seconds|token|ttsurl|player_response|iurl|timestamp|plid|reportabuseurl|BASE_URL|docid|hl|ps|el|abd|autoplay|allow_embed|partnerid|cc3_module|reason|errorcode|suberrorcode";
 
 const qualityCache = new Map();
+const infoInflight = new Map();
 
 function decodeDriveText(value) {
   return decodeURIComponent(
@@ -441,21 +442,26 @@ async function warmDriveSession(fileId, jar = new Map()) {
     Referer: "https://drive.google.com/",
   };
   if (jar.size) headers.Cookie = [...jar.values()].join("; ");
-  for (const path of ["view", "preview"]) {
-    try {
-      const response = await fetch(`https://drive.google.com/file/d/${encodeURIComponent(fileId)}/${path}`, {
-        headers,
-        redirect: "follow",
-      });
-      collectCookies(response, jar);
-    } catch {
-      /* ignore */
-    }
+  try {
+    const response = await fetch(`https://drive.google.com/file/d/${encodeURIComponent(fileId)}/view`, {
+      headers,
+      redirect: "follow",
+    });
+    collectCookies(response, jar);
+  } catch {
+    /* ignore */
   }
   return jar;
 }
 
-async function fetchVideoInfo(fileId) {
+function streamsFromInfoBody(body) {
+  return new Map([
+    ...parseFmtStreamMap(extractInfoField(body, "fmt_stream_map")),
+    ...parseEncodedFmtMap(extractInfoField(body, "url_encoded_fmt_stream_map")),
+  ]);
+}
+
+async function fetchVideoInfoOnce(fileId) {
   const jar = await warmDriveSession(fileId);
   const headers = {
     "User-Agent": UA,
@@ -464,16 +470,19 @@ async function fetchVideoInfo(fileId) {
   };
   if (jar.size) headers.Cookie = [...jar.values()].join("; ");
 
-  const urls = [
-    `https://drive.google.com/get_video_info?docid=${encodeURIComponent(fileId)}`,
-    `https://docs.google.com/get_video_info?docid=${encodeURIComponent(fileId)}`,
-  ];
+  // Uma tentativa só — cada hit conta pra cota de preview do Google.
+  const queries = [`docid=${encodeURIComponent(fileId)}&hl=en&el=detailpage&authuser=0`];
 
   let lastReason = "";
-  for (const url of urls) {
+  let hitQuota = false;
+
+  for (const query of queries) {
     let response;
     try {
-      response = await fetch(url, { headers, redirect: "follow" });
+      response = await fetch(`https://drive.google.com/get_video_info?${query}`, {
+        headers,
+        redirect: "follow",
+      });
     } catch {
       continue;
     }
@@ -481,33 +490,13 @@ async function fetchVideoInfo(fileId) {
     const body = await response.text();
     const status = extractInfoField(body, "status") || "";
     if (status !== "ok") {
-      lastReason =
-        extractInfoField(body, "reason") ||
-        "O Drive não liberou a preview deste vídeo agora.";
+      lastReason = extractInfoField(body, "reason") || lastReason;
+      hitQuota = /exceeded|playback|errorcode=150/i.test(body) || /exceeded|playback/i.test(lastReason);
+      if (hitQuota) break;
       continue;
     }
 
-    const found = new Map([
-      ...parseFmtStreamMap(extractInfoField(body, "fmt_stream_map")),
-      ...parseEncodedFmtMap(extractInfoField(body, "url_encoded_fmt_stream_map")),
-    ]);
-
-    if (!found.size) {
-      try {
-        const view = await fetch(`https://drive.google.com/file/d/${encodeURIComponent(fileId)}/view`, {
-          headers: { ...headers, Accept: "text/html", Cookie: [...jar.values()].join("; ") },
-          redirect: "follow",
-        });
-        const html = await view.text();
-        const mapMatch = html.match(/fmt_stream_map["'\\s:=]+([^"'\\]+)/i);
-        if (mapMatch) {
-          for (const [k, v] of parseFmtStreamMap(decodeDriveText(mapMatch[1]))) found.set(k, v);
-        }
-      } catch {
-        /* ignore */
-      }
-    }
-
+    const found = streamsFromInfoBody(body);
     if (!found.size) {
       lastReason = "O Drive ainda não gerou preview transcodificada deste arquivo.";
       continue;
@@ -521,12 +510,23 @@ async function fetchVideoInfo(fileId) {
   }
 
   const err = new Error(
-    /exceeded|playback/i.test(lastReason)
+    hitQuota || /exceeded|playback/i.test(lastReason)
       ? "O Google limitou as previews deste vídeo por agora. Espera um pouco e tenta de novo."
       : lastReason || "Não consegui abrir a preview do Drive."
   );
   err.preview = true;
+  err.quota = hitQuota || /exceeded|playback/i.test(lastReason);
   throw err;
+}
+
+function fetchVideoInfo(fileId) {
+  const existing = infoInflight.get(fileId);
+  if (existing) return existing;
+  const pending = fetchVideoInfoOnce(fileId).finally(() => {
+    infoInflight.delete(fileId);
+  });
+  infoInflight.set(fileId, pending);
+  return pending;
 }
 
 async function probeQualities(fileId) {
@@ -537,12 +537,15 @@ async function probeQualities(fileId) {
   try {
     const { streams } = await fetchVideoInfo(fileId);
     const value = [...streams.map(({ id, label, src }) => ({ id, label, src })), ...original];
-    qualityCache.set(fileId, { expires: Date.now() + 6 * 60 * 1000, value });
+    qualityCache.set(fileId, { expires: Date.now() + 12 * 60 * 1000, value });
     return value;
   } catch (error) {
     const value = [...original];
     value.error = error.message;
-    qualityCache.set(fileId, { expires: Date.now() + 45 * 1000, value });
+    value.quota = Boolean(error.quota);
+    // Cota: não martela o Google de novo a cada clique.
+    const ttl = error.quota ? 15 * 60 * 1000 : 90 * 1000;
+    qualityCache.set(fileId, { expires: Date.now() + ttl, value });
     return value;
   }
 }
@@ -620,11 +623,8 @@ async function pipeMedia(req, res, fileId, { download = false, filename = "", qu
         await pipeQualityStream(req, res, fileId, pick.id, { filename, download });
         return;
       }
-      if (!wantOriginal) {
-        throw new Error(qualities.error || "Preview do Drive indisponível agora. Tenta de novo daqui a pouco.");
-      }
-    } catch (error) {
-      if (!wantOriginal) throw error;
+    } catch {
+      /* cai no arquivo original */
     }
   }
 

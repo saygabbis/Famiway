@@ -70,6 +70,7 @@ export default function JellyPlayer({ video, onFail }: Props) {
   }, [video.id]);
 
   useEffect(() => {
+    if (!settings) return;
     let alive = true;
     void fetchQualities(video.id).then((data) => {
       if (!alive) return;
@@ -77,14 +78,11 @@ export default function JellyPlayer({ video, onFail }: Props) {
         ? data.qualities
         : [{ id: "auto", label: "Auto" }, ...data.qualities];
       setQualities(list);
-      if (data.error && !list.some((item) => item.id !== "original" && item.id !== "auto")) {
-        onFail(data.error);
-      }
     });
     return () => {
       alive = false;
     };
-  }, [video.id, settings]);
+  }, [settings, video.id]);
 
   useEffect(() => {
     retried.current = false;
