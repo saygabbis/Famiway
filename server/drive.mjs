@@ -375,6 +375,9 @@ const ITAG_LABEL = {
   78: "480p",
 };
 
+const INFO_KEYS =
+  "fmt_list|fmt_stream_map|url_encoded_fmt_stream_map|adaptive_fmts|hlsvp|dashmpd|status|title|length_seconds|token|ttsurl|player_response|iurl|timestamp|plid|reportabuseurl|BASE_URL|docid|hl|ps|el|abd|autoplay|allow_embed|partnerid|cc3_module|reason|errorcode|suberrorcode";
+
 const qualityCache = new Map();
 
 function decodeDriveText(value) {
@@ -388,50 +391,166 @@ function decodeDriveText(value) {
   );
 }
 
-function parseFmtStreams(html) {
-  const found = new Map();
-  const push = (itag, src) => {
-    const label = ITAG_LABEL[Number(itag)];
-    if (!label || !src || !/^https?:\/\//.test(src)) return;
-    found.set(String(itag), { id: String(itag), label, src: src.split(",")[0] });
-  };
+function extractInfoField(body, key) {
+  const token = `${key}=`;
+  const start = body.indexOf(token);
+  if (start < 0) return "";
+  const from = start + token.length;
+  const next = body.slice(from).match(new RegExp(`&(?:${INFO_KEYS})=`));
+  const raw = body.slice(from, next ? from + next.index : body.length);
+  try {
+    return decodeURIComponent(raw.replace(/\+/g, " "));
+  } catch {
+    return raw.replace(/\+/g, " ");
+  }
+}
 
-  const mapMatch = html.match(/fmt_stream_map["'\\s:=]+([^"'\\]+)/i);
-  if (mapMatch) {
-    for (const part of decodeDriveText(mapMatch[1]).split(",")) {
-      const [itag, ...rest] = part.split("|");
-      push(itag, rest.join("|"));
+function parseFmtStreamMap(map) {
+  const found = new Map();
+  if (!map) return found;
+  for (const part of map.split(",")) {
+    if (!part.includes("|")) continue;
+    const itag = part.slice(0, part.indexOf("|"));
+    const src = part.slice(itag.length + 1);
+    const label = ITAG_LABEL[Number(itag)];
+    if (!label || !/^https?:\/\//.test(src)) continue;
+    found.set(String(itag), { id: String(itag), label, src });
+  }
+  return found;
+}
+
+function parseEncodedFmtMap(encoded) {
+  const found = new Map();
+  if (!encoded) return found;
+  for (const part of encoded.split(",")) {
+    const params = new URLSearchParams(part);
+    const itag = params.get("itag");
+    const src = params.get("url");
+    const label = ITAG_LABEL[Number(itag)];
+    if (!label || !src || !/^https?:\/\//.test(src)) continue;
+    found.set(String(itag), { id: String(itag), label, src });
+  }
+  return found;
+}
+
+async function warmDriveSession(fileId, jar = new Map()) {
+  const headers = {
+    "User-Agent": UA,
+    Accept: "text/html,application/xhtml+xml",
+    "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
+    Referer: "https://drive.google.com/",
+  };
+  if (jar.size) headers.Cookie = [...jar.values()].join("; ");
+  for (const path of ["view", "preview"]) {
+    try {
+      const response = await fetch(`https://drive.google.com/file/d/${encodeURIComponent(fileId)}/${path}`, {
+        headers,
+        redirect: "follow",
+      });
+      collectCookies(response, jar);
+    } catch {
+      /* ignore */
     }
   }
+  return jar;
+}
 
-  for (const match of html.matchAll(/itag[=:](\d{2,3})[^"]{0,80}?(https:\/\/[^"\\]+)/gi)) {
-    push(match[1], decodeDriveText(match[2]));
+async function fetchVideoInfo(fileId) {
+  const jar = await warmDriveSession(fileId);
+  const headers = {
+    "User-Agent": UA,
+    Accept: "*/*",
+    Referer: `https://drive.google.com/file/d/${fileId}/view`,
+  };
+  if (jar.size) headers.Cookie = [...jar.values()].join("; ");
+
+  const urls = [
+    `https://drive.google.com/get_video_info?docid=${encodeURIComponent(fileId)}`,
+    `https://docs.google.com/get_video_info?docid=${encodeURIComponent(fileId)}`,
+  ];
+
+  let lastReason = "";
+  for (const url of urls) {
+    let response;
+    try {
+      response = await fetch(url, { headers, redirect: "follow" });
+    } catch {
+      continue;
+    }
+    collectCookies(response, jar);
+    const body = await response.text();
+    const status = extractInfoField(body, "status") || "";
+    if (status !== "ok") {
+      lastReason =
+        extractInfoField(body, "reason") ||
+        "O Drive não liberou a preview deste vídeo agora.";
+      continue;
+    }
+
+    const found = new Map([
+      ...parseFmtStreamMap(extractInfoField(body, "fmt_stream_map")),
+      ...parseEncodedFmtMap(extractInfoField(body, "url_encoded_fmt_stream_map")),
+    ]);
+
+    if (!found.size) {
+      try {
+        const view = await fetch(`https://drive.google.com/file/d/${encodeURIComponent(fileId)}/view`, {
+          headers: { ...headers, Accept: "text/html", Cookie: [...jar.values()].join("; ") },
+          redirect: "follow",
+        });
+        const html = await view.text();
+        const mapMatch = html.match(/fmt_stream_map["'\\s:=]+([^"'\\]+)/i);
+        if (mapMatch) {
+          for (const [k, v] of parseFmtStreamMap(decodeDriveText(mapMatch[1]))) found.set(k, v);
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+
+    if (!found.size) {
+      lastReason = "O Drive ainda não gerou preview transcodificada deste arquivo.";
+      continue;
+    }
+
+    return {
+      streams: [...found.values()].sort((a, b) => Number.parseInt(a.label) - Number.parseInt(b.label)),
+      jar,
+      lengthSeconds: Number(extractInfoField(body, "length_seconds")) || 0,
+    };
   }
 
-  return [...found.values()].sort((a, b) => Number.parseInt(a.label) - Number.parseInt(b.label));
+  const err = new Error(
+    /exceeded|playback/i.test(lastReason)
+      ? "O Google limitou as previews deste vídeo por agora. Espera um pouco e tenta de novo."
+      : lastReason || "Não consegui abrir a preview do Drive."
+  );
+  err.preview = true;
+  throw err;
 }
 
 async function probeQualities(fileId) {
   const cached = qualityCache.get(fileId);
   if (cached && cached.expires > Date.now()) return cached.value;
+
   const original = [{ id: "original", label: "Original" }];
   try {
-    const response = await fetch(`https://drive.google.com/file/d/${encodeURIComponent(fileId)}/view`, {
-      headers: {
-        "User-Agent": UA,
-        Accept: "text/html",
-        "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
-      },
-      redirect: "follow",
-    });
-    const html = await response.text();
-    const extras = parseFmtStreams(html);
-    const value = [...original, ...extras];
-    qualityCache.set(fileId, { expires: Date.now() + 8 * 60 * 1000, value });
+    const { streams } = await fetchVideoInfo(fileId);
+    const value = [...streams.map(({ id, label, src }) => ({ id, label, src })), ...original];
+    qualityCache.set(fileId, { expires: Date.now() + 6 * 60 * 1000, value });
     return value;
-  } catch {
-    return original;
+  } catch (error) {
+    const value = [...original];
+    value.error = error.message;
+    qualityCache.set(fileId, { expires: Date.now() + 45 * 1000, value });
+    return value;
   }
+}
+
+function bestPreviewQuality(qualities) {
+  const previews = (qualities || []).filter((item) => item.id !== "original" && item.src);
+  if (!previews.length) return null;
+  return previews[previews.length - 1];
 }
 
 async function openQualityUrl(src, range) {
@@ -487,13 +606,25 @@ async function pipeQualityStream(req, res, fileId, quality, { filename = "", dow
   }
 }
 
-async function pipeMedia(req, res, fileId, { download = false, filename = "", quality = "original", size = 0 } = {}) {
-  if (quality && quality !== "original") {
+async function pipeMedia(req, res, fileId, { download = false, filename = "", quality = "auto", size = 0 } = {}) {
+  const wantOriginal = quality === "original" || download;
+  const wantNamed = Boolean(quality) && quality !== "original" && quality !== "auto";
+
+  if (!wantOriginal || wantNamed) {
     try {
-      await pipeQualityStream(req, res, fileId, quality, { filename, download });
-      return;
-    } catch {
-      /* cai pro original */
+      const qualities = await probeQualities(fileId);
+      const pick = wantNamed
+        ? qualities.find((item) => item.id === quality && item.src)
+        : bestPreviewQuality(qualities);
+      if (pick?.src) {
+        await pipeQualityStream(req, res, fileId, pick.id, { filename, download });
+        return;
+      }
+      if (!wantOriginal) {
+        throw new Error(qualities.error || "Preview do Drive indisponível agora. Tenta de novo daqui a pouco.");
+      }
+    } catch (error) {
+      if (!wantOriginal) throw error;
     }
   }
 
@@ -636,9 +767,22 @@ export async function handleApi(req, res) {
   if (qualities) {
     try {
       const items = await probeQualities(qualities[1]);
-      json(res, 200, { qualities: items.map(({ id, label }) => ({ id, label })) });
-    } catch {
-      json(res, 200, { qualities: [{ id: "original", label: "Original" }] });
+      const previews = items.filter((item) => item.id !== "original" && item.src);
+      const preferred = bestPreviewQuality(items)?.id || "auto";
+      json(res, 200, {
+        preferred,
+        error: items.error || null,
+        qualities: [
+          ...previews.map(({ id, label }) => ({ id, label })),
+          { id: "original", label: "Original" },
+        ],
+      });
+    } catch (error) {
+      json(res, 200, {
+        preferred: "auto",
+        error: error.message || null,
+        qualities: [{ id: "original", label: "Original" }],
+      });
     }
     return true;
   }
@@ -648,7 +792,7 @@ export async function handleApi(req, res) {
     try {
       await pipeMedia(req, res, stream[1], {
         filename: url.searchParams.get("name") || "",
-        quality: url.searchParams.get("quality") || "original",
+        quality: url.searchParams.get("quality") || "auto",
         size: Number(url.searchParams.get("size")) || 0,
       });
     } catch (error) {

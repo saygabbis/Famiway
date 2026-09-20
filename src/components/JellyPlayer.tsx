@@ -43,8 +43,8 @@ export default function JellyPlayer({ video, onFail }: Props) {
   const [settings, setSettings] = useState(false);
   const [speed, setSpeed] = useState(readSpeed);
   const [loop, setLoop] = useState(() => window.localStorage.getItem("famiway:loop") === "1");
-  const [quality, setQuality] = useState("original");
-  const [qualities, setQualities] = useState<VideoQuality[]>([{ id: "original", label: "Original" }]);
+  const [quality, setQuality] = useState("auto");
+  const [qualities, setQualities] = useState<VideoQuality[]>([{ id: "auto", label: "Auto" }]);
   const [bufferedPct, setBufferedPct] = useState(0);
   const [buffering, setBuffering] = useState(true);
   const [flash, setFlash] = useState<"play" | "pause" | null>(null);
@@ -59,8 +59,8 @@ export default function JellyPlayer({ video, onFail }: Props) {
     onFail(null);
     setBuffering(true);
     setFlash(null);
-    setQualities([{ id: "original", label: "Original" }]);
-    setQuality("original");
+    setQualities([{ id: "auto", label: "Auto" }]);
+    setQuality("auto");
     const node = ref.current;
     if (!node) return;
     node.playbackRate = speed;
@@ -70,18 +70,23 @@ export default function JellyPlayer({ video, onFail }: Props) {
   }, [video.id]);
 
   useEffect(() => {
-    if (!settings) return;
     let alive = true;
-    void fetchQualities(video.id).then((items) => {
-      if (alive) setQualities(items);
+    void fetchQualities(video.id).then((data) => {
+      if (!alive) return;
+      const list = data.qualities.some((item) => item.id === "auto")
+        ? data.qualities
+        : [{ id: "auto", label: "Auto" }, ...data.qualities];
+      setQualities(list);
+      if (data.error && !list.some((item) => item.id !== "original" && item.id !== "auto")) {
+        onFail(data.error);
+      }
     });
     return () => {
       alive = false;
     };
-  }, [settings, video.id]);
+  }, [video.id, settings]);
 
   useEffect(() => {
-    if (quality === "original") return;
     retried.current = false;
     setBuffering(true);
     const node = ref.current;

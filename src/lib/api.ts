@@ -49,7 +49,7 @@ export type VideoQuality = {
   label: string;
 };
 
-export function streamUrl(video: DriveVideo, quality = "original") {
+export function streamUrl(video: DriveVideo, quality = "auto") {
   const params = new URLSearchParams({
     name: video.name,
     quality,
@@ -58,13 +58,21 @@ export function streamUrl(video: DriveVideo, quality = "original") {
   return `/api/stream/${encodeURIComponent(video.id)}?${params}`;
 }
 
-export async function fetchQualities(id: string): Promise<VideoQuality[]> {
+export async function fetchQualities(id: string): Promise<{ qualities: VideoQuality[]; preferred: string; error: string | null }> {
   try {
     const response = await fetch(`/api/qualities/${encodeURIComponent(id)}`);
     const data = await response.json();
-    return data.qualities?.length ? data.qualities : [{ id: "original", label: "Original" }];
+    return {
+      qualities: data.qualities?.length ? data.qualities : [{ id: "original", label: "Original" }],
+      preferred: data.preferred || "auto",
+      error: data.error || null,
+    };
   } catch {
-    return [{ id: "original", label: "Original" }];
+    return {
+      qualities: [{ id: "original", label: "Original" }],
+      preferred: "auto",
+      error: null,
+    };
   }
 }
 
