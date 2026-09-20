@@ -2,7 +2,7 @@ import { useState } from "react";
 import { motion } from "framer-motion";
 import { ChevronLeft } from "lucide-react";
 import JellyPlayer from "../components/JellyPlayer";
-import { displayTitle, formatBytes, type DriveVideo } from "../lib/api";
+import { displayTitle, type DriveVideo } from "../lib/api";
 
 type Props = {
   video: DriveVideo;
@@ -10,7 +10,7 @@ type Props = {
 };
 
 export default function Player({ video, onBack }: Props) {
-  const [failed, setFailed] = useState(false);
+  const [failMsg, setFailMsg] = useState<string | null>(null);
 
   return (
     <motion.section
@@ -26,12 +26,8 @@ export default function Player({ video, onBack }: Props) {
         </button>
         <h1>{displayTitle(video.name)}</h1>
       </div>
-      <JellyPlayer video={video} onFail={setFailed} />
-      {failed ? (
-        <p className="warn">
-          Ainda não consegui abrir este arquivo ({formatBytes(video.size) || "grande"}). Tenta de novo.
-        </p>
-      ) : null}
+      <JellyPlayer video={video} onFail={setFailMsg} />
+      {failMsg ? <p className="warn">{failMsg}</p> : null}
     </motion.section>
   );
 }

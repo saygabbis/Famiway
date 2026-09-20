@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { Download, Maximize, Pause, PictureInPicture2, Play, Repeat, Settings, Volume2, VolumeX } from "lucide-react";
-import { downloadUrl, fetchQualities, streamUrl, type DriveVideo, type VideoQuality } from "../lib/api";
+import { downloadUrl, fetchQualities, formatBytes, streamUrl, type DriveVideo, type VideoQuality } from "../lib/api";
 
 type Props = {
   video: DriveVideo;
-  onFail: (failed: boolean) => void;
+  onFail: (message: string | null) => void;
 };
 
 const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
@@ -56,7 +56,7 @@ export default function JellyPlayer({ video, onFail }: Props) {
 
   useEffect(() => {
     retried.current = false;
-    onFail(false);
+    onFail(null);
     setBuffering(true);
     setFlash(null);
     setQualities([{ id: "original", label: "Original" }]);
@@ -205,7 +205,7 @@ export default function JellyPlayer({ video, onFail }: Props) {
         preload="auto"
         onPlay={() => {
           setPlaying(true);
-          onFail(false);
+          onFail(null);
         }}
         onPause={() => setPlaying(false)}
         onTimeUpdate={() => setCurrent(ref.current?.currentTime || 0)}
@@ -237,7 +237,22 @@ export default function JellyPlayer({ video, onFail }: Props) {
             }, 1200);
             return;
           }
-          onFail(true);
+          void (async () => {
+            try {
+              const response = await fetch(streamUrl(video, quality), {
+                headers: { Range: "bytes=0-1023" },
+              });
+              const type = response.headers.get("content-type") || "";
+              if (type.includes("json")) {
+                const data = await response.json();
+                onFail(data.error || "Não consegui abrir este vídeo.");
+                return;
+              }
+            } catch {
+              /* ignore */
+            }
+            onFail(`Não consegui abrir este arquivo (${formatBytes(video.size) || "grande"}). Tenta de novo daqui a pouco.`);
+          })();
         }}
       />
 
